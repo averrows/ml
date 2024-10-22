@@ -1,6 +1,9 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+import numpy as np
+from torchvision.utils import save_image
+
 class UnetBlock(nn.Module):
     def __init__(self, in_channels, out_channels, timestep_channel, size):
         super().__init__()
@@ -14,6 +17,7 @@ class UnetBlock(nn.Module):
         self.layer_norm = nn.LayerNorm((out_channels, size, size))
     
     def forward(self, x, timestep_embedding):
+        x = x.float()
         x_param = self.conv2d_multiplied_by_param(x)
         x_origin = self.conv2d_img(x)
 
@@ -116,6 +120,8 @@ class Unet(nn.Module):
             nn.ReLU(),
         )
 
+        self.opt = torch.optim.Adam(self.parameters(), lr=0.0008)
+
     def forward(self, x, timestep):
         timestep_embedding = self.embed_timestep(timestep)
         x_down = self._forward_down(x, timestep_embedding)
@@ -141,10 +147,52 @@ class Unet(nn.Module):
         return x
 
 BATCH_SIZE = 32
+import torchvision
+from torchvision import transforms
 def main():
+    transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    all_trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+
+    # filter training imgs
+    idx = [i for i, (img, label) in enumerate(all_trainset) if label == 1]
+    sub_trainset = torch.utils.data.Subset(all_trainset, idx)
+
+    trainloader = torch.utils.data.DataLoader(sub_trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    train(trainloader)
+
+EPOCH = 5
+TIMESTEP = 16
+
+def train(trainloader):
     model = Unet()
-    ts = torch.randint(0, 16, size=(BATCH_SIZE, 1), dtype=torch.float)
-    x = torch.randn((BATCH_SIZE, 3, 32, 32))
-    y = model(x, ts)
-    print(y.shape)
+    for ep in range(EPOCH):
+        for j, (x, _) in enumerate(trainloader):
+            print(x.shape)
+            timesteps = torch.randint(0, EPOCH, size=(BATCH_SIZE, 1), dtype=torch.float)
+            x_noise, y_noise = create_noise_timestep_x_y(x, torch.randint(0, 16, size=(BATCH_SIZE, 1)), 16)
+            y_pred = model(x_noise, timesteps)
+            if j == 10:
+                save_image(y_pred, f'y_pred_epoch_{ep}_batch_{j}.png')
+            loss = torch.mean(torch.abs(y_pred - y_noise))
+            model.opt.zero_grad()
+            loss.backward()
+            model.opt.step()
+
+def create_noise_timestep_x_y(x, timesteps, ts_range):
+    lin_range = np.linspace(0, 1, num=ts_range + 1)
+    noise = torch.rand_like(x)
+    timesteps = timesteps.view(-1)
+    alpha = np.reshape((1 - lin_range[timesteps]),(-1, 1, 1, 1))
+    y_alpha = np.reshape((1 - lin_range[timesteps + 1]),(-1, 1, 1, 1))
+
+    x = x * (1 - alpha) + noise * alpha
+    y = x * (1 - y_alpha) + noise * y_alpha
+
+    return x, y    
+
 main()
+train(torch.randn((BATCH_SIZE, 3, 32, 32)))
